@@ -37,16 +37,67 @@ export class SignalsService {
   constructor(@InjectModel(Signal.name) private readonly signalModel: Model<Signal>) {}
 
   async createInternal(dto: CreateSignalDto, correlationId?: string): Promise<Signal> {
-    try {
-      const input: any = { ...dto };
-      if (!input.expires_at && input.validity && input.created_at) {
-        const ttlSeconds = validityToMaxTtlSeconds(input.validity);
-        if (ttlSeconds && ttlSeconds > 0) {
-          const createdAt = new Date(input.created_at);
-          input.expires_at = new Date(createdAt.getTime() + ttlSeconds * 1000);
-        }
+    const input: Record<string, unknown> = {
+      asset: dto.asset,
+      signal_type: dto.signal_type,
+      entry_range: dto.entry_range,
+      stop_loss: dto.stop_loss,
+      take_profit: dto.take_profit,
+      timeframe: dto.timeframe,
+      confidence: dto.confidence,
+      strategy: dto.strategy,
+      reason: dto.reason,
+      validity: dto.validity,
+      created_at: new Date(dto.created_at),
+      status: dto.status,
+      risk_reward_ratio: dto.risk_reward_ratio,
+    };
+    if (dto.dedup_key) input.dedup_key = dto.dedup_key;
+    if (dto.expires_at) {
+      input.expires_at = new Date(dto.expires_at);
+    } else if (dto.validity && dto.created_at) {
+      const ttlSeconds = validityToMaxTtlSeconds(dto.validity);
+      if (ttlSeconds && ttlSeconds > 0) {
+        const createdAt = new Date(dto.created_at);
+        input.expires_at = new Date(createdAt.getTime() + ttlSeconds * 1000);
       }
+    }
 
+    if (dto.dedup_key) {
+      try {
+        const doc = await this.signalModel
+          .findOneAndUpdate({ dedup_key: dto.dedup_key }, { $set: input }, { upsert: true, new: true, runValidators: true })
+          .exec();
+        if (!doc) {
+          throw new Error('Upsert returned no document');
+        }
+        this.logger.log(
+          JSON.stringify({
+            event: 'signal_upserted',
+            correlation_id: correlationId,
+            asset: dto.asset,
+            timeframe: dto.timeframe,
+            status: doc.status,
+            signal_type: dto.signal_type,
+            dedup_key: dto.dedup_key,
+          }),
+        );
+        return doc;
+      } catch (e: any) {
+        this.logger.error(
+          JSON.stringify({
+            event: 'signal_upsert_failed',
+            correlation_id: correlationId,
+            asset: dto.asset,
+            timeframe: dto.timeframe,
+            error: e?.message ?? String(e),
+          }),
+        );
+        throw e;
+      }
+    }
+
+    try {
       const created = new this.signalModel(input);
       const saved = await created.save();
 
@@ -63,7 +114,6 @@ export class SignalsService {
 
       return saved;
     } catch (e: any) {
-      // Mongo duplicate key error code.
       if (e?.code === 11000) {
         this.logger.warn(
           JSON.stringify({
